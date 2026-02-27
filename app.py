@@ -1,10 +1,9 @@
-import sys
-from pathlib import Path
-
-# Add project root to sys.path so ingestion/, chain/, vectorstore/ are importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import streamlit as st
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from ingestion.cloner           import clone_or_pull
 from ingestion.loader           import load_repo_documents
 from ingestion.chunker          import chunk_documents
@@ -18,6 +17,7 @@ st.caption("Powered by Groq · LangChain · Pinecone")
 # ── Sidebar ────────────────────────────────────────────────
 with st.sidebar:
     st.header("📦 Load a Repository")
+
     repo_url = st.text_input(
         "GitHub URL",
         placeholder="https://github.com/owner/repo"
@@ -29,22 +29,22 @@ with st.sidebar:
     with col2:
         load_btn = st.button("📂 Load", use_container_width=True)
 
-    # Ingest fresh repo
+    # ── Ingest fresh repo ──────────────────────────────────
     if ingest_btn:
         if not repo_url:
             st.error("Please enter a GitHub URL")
         else:
             with st.status("Processing...", expanded=True) as status:
-                st.write("Cloning repo...")
+                st.write("📥 Cloning repo...")
                 path, name = clone_or_pull(repo_url)
 
-                st.write("Loading files...")
+                st.write("📂 Loading files...")
                 docs = load_repo_documents(path)
 
-                st.write(f"Chunking {len(docs)} files...")
+                st.write(f"✂️ Chunking {len(docs)} files...")
                 chunks = chunk_documents(docs)
 
-                st.write(f"Uploading {len(chunks)} chunks to Pinecone...")
+                st.write(f"📌 Uploading {len(chunks)} chunks to Pinecone...")
                 ingest_to_pinecone(chunks, name)
 
                 status.update(label="✅ Ready!", state="complete")
@@ -52,72 +52,81 @@ with st.sidebar:
             st.session_state["repo_name"] = name
             st.session_state["messages"]  = []
             st.session_state["chain"]     = None
+            st.session_state["retriever"] = None
 
-    # Load already ingested repo
+    # ── Load already ingested repo ─────────────────────────
     if load_btn:
         if not repo_url:
             st.error("Please enter a GitHub URL")
         else:
-            name = repo_url.rstrip("/").split("/")[-1]
+            name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
             st.session_state["repo_name"] = name
             st.session_state["messages"]  = []
             st.session_state["chain"]     = None
-            st.success(f"Loaded: {name}")
+            st.session_state["retriever"] = None
+            st.success(f"✅ Loaded: {name}")
 
+    # ── Active repo info ───────────────────────────────────
     if "repo_name" in st.session_state:
         st.divider()
         st.success(f"Active: `{st.session_state['repo_name']}`")
+        st.caption(f"LLM: llama-3.3-70b via Groq")
+        st.caption(f"Embeddings: all-MiniLM-L6-v2")
+        st.caption(f"Vector DB: Pinecone serverless")
 
         if st.button("🗑️ Clear Chat"):
             st.session_state["messages"] = []
             st.rerun()
 
-# ── Build chain lazily ─────────────────────────────────────
-if "repo_name" in st.session_state and st.session_state.get("chain") is None:
+# ── Guard: no repo loaded yet ──────────────────────────────
+if "repo_name" not in st.session_state:
+    st.info("👈 Enter a GitHub URL in the sidebar and click Ingest or Load")
+    st.stop()
+
+# ── Build chain lazily (only once per session) ─────────────
+if st.session_state.get("chain") is None:
     with st.spinner("Connecting to Pinecone..."):
-        vs    = load_vectorstore(st.session_state["repo_name"])
+        vs = load_vectorstore(st.session_state["repo_name"])
         chain, retriever = build_rag_chain(vs)
         st.session_state["chain"]     = chain
         st.session_state["retriever"] = retriever
 
-# ── Chat interface ─────────────────────────────────────────
+# ── Chat history ───────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-if "repo_name" not in st.session_state:
-    st.info("👈 Enter a GitHub URL and click Ingest or Load")
-    st.stop()
-
-# Display chat history
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Chat input
+# ── Chat input ─────────────────────────────────────────────
 if prompt := st.chat_input(f"Ask about {st.session_state.get('repo_name', 'the repo')}..."):
-    st.session_state["messages"].append({"role": "user", "content": prompt})
 
+    # Show user message
+    st.session_state["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Get sources
+    # Retrieve sources
     sources = st.session_state["retriever"].invoke(prompt)
 
-    # Stream response
+    # Stream assistant response
     with st.chat_message("assistant"):
         response = st.write_stream(
             st.session_state["chain"].stream(prompt)
         )
 
+    # Save to history
     st.session_state["messages"].append({
-        "role": "assistant",
+        "role":    "assistant",
         "content": response
     })
 
-    # Show sources
-    with st.expander(f"📎 {len(sources)} source chunks"):
-        for i, doc in enumerate(sources, 1):
-            src  = doc.metadata.get("source", "unknown")
-            ext  = doc.metadata.get("extension", "").lstrip(".")
-            st.markdown(f"**[{i}] `{src}`**")
-            st.code(doc.page_content[:400] + "...", language=ext)
+    # Show source chunks
+    if sources:
+        with st.expander(f"📎 {len(sources)} source chunks used"):
+            for i, doc in enumerate(sources, 1):
+                src = doc.metadata.get("source", "unknown")
+                ext = doc.metadata.get("extension", "").lstrip(".")
+                st.markdown(f"**[{i}] `{src}`**")
+                st.code(doc.page_content[:400] + "...", language=ext or "text")
