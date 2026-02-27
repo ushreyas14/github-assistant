@@ -9,7 +9,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX   = os.getenv("PINECONE_INDEX_NAME", "github-rag")
 
 # Models
-GROQ_MODEL  = "llama3-70b-8192"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 EMBED_MODEL = "all-MiniLM-L6-v2"
 EMBED_DIM   = 384
 
